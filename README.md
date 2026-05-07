@@ -9,6 +9,10 @@ VerdictIQ is a full-lifecycle court judgment intelligence system for government 
 Zero critical orders missed. Every action item source-cited. Every extraction human-verified before dashboard display.
 
 ---
+## Link to the demo video
+[![Watch the video](Link)](https://drive.google.com/file/d/16AM6G0766v_ENI_2XywtQM_MyAeGK0i8/view?usp=drive_link)
+
+---
 
 ## 📋 The Problem VerdictIQ Solves
 
