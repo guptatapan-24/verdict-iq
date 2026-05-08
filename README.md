@@ -10,11 +10,11 @@ Zero critical orders missed. Every action item source-cited. Every extraction hu
 
 ---
 ## Link to the PPT
-[!(Link)](https://canva.link/d4rhc3xidwbdyrh)
+[(Link)](https://canva.link/d4rhc3xidwbdyrh)
 
 ---
 ## Link to the demo video
-[![Watch the video](Link)](https://drive.google.com/file/d/16AM6G0766v_ENI_2XywtQM_MyAeGK0i8/view?usp=drive_link)
+[(Link)](https://drive.google.com/file/d/16AM6G0766v_ENI_2XywtQM_MyAeGK0i8/view?usp=drive_link)
 
 ---
 
