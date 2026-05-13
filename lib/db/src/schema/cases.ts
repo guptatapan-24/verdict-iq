@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, pgEnum, date } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, pgEnum, date, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -33,6 +33,14 @@ export const casesTable = pgTable("cases", {
   notes: text("notes"),
   processingStartedAt: timestamp("processing_started_at"),
   processingCompletedAt: timestamp("processing_completed_at"),
+  
+  // Statutory Limitation Engine Fields
+  // Nullable for backward compatibility and zero-downtime deployment
+  limitationDeadlineCalculated: timestamp("limitation_deadline_calculated"),
+  limitationStatute: text("limitation_statute"),
+  limitationRuleId: text("limitation_rule_id"),
+  limitationIsInferred: boolean("limitation_is_inferred"),
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
