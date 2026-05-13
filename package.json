@@ -3,10 +3,13 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
-    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "preinstall": "node ./scripts/require-pnpm.cjs",
+    "local:setup": "node ./scripts/local/setup.mjs",
+    "local:dev": "node ./scripts/local/dev.mjs",
+    "local:db:push": "node ./scripts/local/db-push.mjs",
+    "build": "node ./scripts/local/pnpm-cli.mjs run typecheck && node ./scripts/local/pnpm-cli.mjs -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "node ./scripts/local/pnpm-cli.mjs run typecheck:libs && node ./scripts/local/pnpm-cli.mjs -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
   "private": true,
   "devDependencies": {

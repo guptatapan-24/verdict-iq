@@ -20,7 +20,7 @@ import {
 import { eq, and, or, ilike, desc, asc, sql } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 
-const MODEL = "gpt-5.4";
+const MODEL = process.env.AI_INTEGRATIONS_GROQ_MODEL || "llama-3.3-70b-versatile";
 
 // How many chars roughly correspond to one page in a dense Indian judgment
 const CHARS_PER_PAGE_ESTIMATE = 2000;
@@ -81,6 +81,12 @@ function sanitizeClassification(val: string): "mandatory" | "advisory" | "unknow
   if (lower.includes("mandatory") || lower.includes("order") || lower.includes("direct") || lower.includes("shall")) return "mandatory";
   if (lower.includes("advisory") || lower.includes("suggest") || lower.includes("recommend")) return "advisory";
   return "unknown";
+}
+
+function normalizeDepartment(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /** Split full judgment text into overlapping chunks.
@@ -663,7 +669,7 @@ router.post("/cases/:id/process", requireRole(["admin"]), async (req, res) => {
           deadline: sanitizeDate(d.deadline),
           deadlineInferred: d.deadlineInferred,
           deadlineSource: d.deadlineSource ?? null,
-          responsibleDepartment: d.responsibleDepartment,
+          responsibleDepartment: normalizeDepartment(d.responsibleDepartment),
           actionRequired: d.actionRequired,
           isNovel: d.isNovel,
           confidenceScore: Math.min(1, Math.max(0, d.confidenceScore)),
@@ -676,7 +682,7 @@ router.post("/cases/:id/process", requireRole(["admin"]), async (req, res) => {
         directiveId: directive.id,
         title: d.actionRequired.length > 80 ? d.actionRequired.slice(0, 77) + "..." : d.actionRequired,
         description: d.actionRequired,
-        department: d.responsibleDepartment,
+        department: normalizeDepartment(d.responsibleDepartment) ?? "Unassigned",
         priority: d.classification === "mandatory"
           ? (d.type === "stay" || d.type === "compliance_order" ? "critical" : "high")
           : "medium",

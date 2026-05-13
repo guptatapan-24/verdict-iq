@@ -21,11 +21,12 @@ router.get("/users", requireRole(["admin"]), async (_req, res) => {
 router.patch("/users/:clerkId/role", requireRole(["admin"]), async (req, res) => {
   const parsed = UpdateUserRoleBody.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid role" });
+  const clerkId = String(req.params.clerkId ?? "");
 
   const target = await db
     .select()
     .from(usersTable)
-    .where(eq(usersTable.clerkId, req.params.clerkId))
+    .where(eq(usersTable.clerkId, clerkId))
     .then((r) => r[0]);
 
   if (!target) return res.status(404).json({ error: "User not found" });
@@ -33,7 +34,7 @@ router.patch("/users/:clerkId/role", requireRole(["admin"]), async (req, res) =>
   const [updated] = await db
     .update(usersTable)
     .set({ role: parsed.data.role, updatedAt: new Date() })
-    .where(eq(usersTable.clerkId, req.params.clerkId))
+    .where(eq(usersTable.clerkId, clerkId))
     .returning();
 
   await db.insert(roleChangeLogTable).values({
