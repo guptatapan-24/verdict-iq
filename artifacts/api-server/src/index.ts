@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { startProcessingWorker } from "./processing/processing-queue";
 
 const rawPort = process.env["PORT"];
 
@@ -21,5 +22,6 @@ app.listen(port, (err) => {
     process.exit(1);
   }
 
+  startProcessingWorker();
   logger.info({ port }, "Server listening");
 });

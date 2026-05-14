@@ -192,11 +192,11 @@ export function waitForDatabasePort(env, timeoutMs = 90000) {
 export function warnForPlaceholderSecrets(env) {
   const placeholders = [
     "replace-with-your-clerk-secret-key",
-    "replace-with-your-groq-api-key",
+    "replace-with-your-ollama-api-key",
   ];
 
   const missing = [];
-  for (const key of ["CLERK_SECRET_KEY", "AI_INTEGRATIONS_GROQ_API_KEY"]) {
+  for (const key of ["CLERK_SECRET_KEY", "AI_INTEGRATIONS_OLLAMA_API_KEY"]) {
     if (!env[key] || placeholders.includes(env[key])) {
       missing.push(key);
     }

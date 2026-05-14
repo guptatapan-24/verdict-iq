@@ -7,6 +7,7 @@ import {
   directivesTable,
   actionItemsTable,
   auditLogTable,
+  processingJobsTable,
 } from "@workspace/db";
 import {
   ListCasesQueryParams,
@@ -17,336 +18,8 @@ import {
   ProcessCaseParams,
   GetComplianceTimelineParams,
 } from "@workspace/api-zod";
-import { eq, and, or, ilike, desc, asc, sql } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
-
-const MODEL = process.env.AI_INTEGRATIONS_GROQ_MODEL || "llama-3.3-70b-versatile";
-
-// How many chars roughly correspond to one page in a dense Indian judgment
-const CHARS_PER_PAGE_ESTIMATE = 2000;
-const CHUNK_SIZE = 6000;
-const CHUNK_OVERLAP = 600;
-const MAX_CHUNKS = 50;
-const CHUNK_BATCH_SIZE = 6;
-
-interface ExtractedDirective {
-  type: "compliance_order" | "stay" | "direction" | "limitation_period" | "appeal" | "observation" | "other";
-  classification: "mandatory" | "advisory";
-  sourceText: string;
-  pageNumber: number;
-  paragraphRef: string | null;
-  deadline: string | null;
-  deadlineInferred: boolean;
-  deadlineSource: string | null;
-  responsibleDepartment: string;
-  actionRequired: string;
-  isNovel: boolean;
-  confidenceScore: number;
-}
-
-interface Chunk {
-  text: string;
-  estStartPage: number;
-  estEndPage: number;
-  index: number;
-}
-
-/** Return a valid YYYY-MM-DD string or null. Rejects descriptive text the AI sometimes returns. */
-function sanitizeDate(val: string | null | undefined): string | null {
-  if (!val) return null;
-  const trimmed = val.trim().split("T")[0];
-  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
-}
-
-const VALID_DIRECTIVE_TYPES = new Set([
-  "compliance_order", "stay", "direction", "limitation_period", "appeal", "observation", "other",
-]);
-function sanitizeDirectiveType(val: string): "compliance_order" | "stay" | "direction" | "limitation_period" | "appeal" | "observation" | "other" {
-  if (VALID_DIRECTIVE_TYPES.has(val)) return val as ReturnType<typeof sanitizeDirectiveType>;
-  // Common AI mis-labels → best-fit mapping
-  const lower = val.toLowerCase();
-  if (lower.includes("stay") || lower.includes("interim") || lower.includes("injunct")) return "stay";
-  if (lower.includes("comply") || lower.includes("compliance")) return "compliance_order";
-  if (lower.includes("appeal")) return "appeal";
-  if (lower.includes("limit") || lower.includes("period")) return "limitation_period";
-  if (lower.includes("direct") || lower.includes("order")) return "direction";
-  if (lower.includes("observ")) return "observation";
-  return "other";
-}
-
-const VALID_CLASSIFICATIONS = new Set(["mandatory", "advisory", "unknown"]);
-function sanitizeClassification(val: string): "mandatory" | "advisory" | "unknown" {
-  if (VALID_CLASSIFICATIONS.has(val)) return val as ReturnType<typeof sanitizeClassification>;
-  const lower = val.toLowerCase();
-  if (lower.includes("mandatory") || lower.includes("order") || lower.includes("direct") || lower.includes("shall")) return "mandatory";
-  if (lower.includes("advisory") || lower.includes("suggest") || lower.includes("recommend")) return "advisory";
-  return "unknown";
-}
-
-function normalizeDepartment(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-/** Split full judgment text into overlapping chunks.
- *  Strategy for Indian court judgments:
- *  - Last 40% (operative part): 65% of chunk budget, evenly spaced
- *  - First 60% (facts + analysis): 35% of chunk budget, evenly spaced
- *
- *  This guarantees both sections get meaningful AI coverage regardless of
- *  document length — avoiding the failure mode where a very long tail fills the
- *  entire budget and the first 60% of the judgment gets no coverage.
- */
-function buildChunks(fullText: string, pageCount: number): Chunk[] {
-  const textLen = fullText.length;
-
-  if (textLen <= CHUNK_SIZE * 1.5) {
-    return [{ text: fullText, estStartPage: 1, estEndPage: Math.max(pageCount, 1), index: 0 }];
-  }
-
-  const tailBudget = Math.floor(MAX_CHUNKS * 0.65); // ~32 chunks for last 40%
-  const headBudget = MAX_CHUNKS - tailBudget;        // ~18 chunks for first 60%
-
-  const tailCutoff = Math.floor(textLen * 0.60);
-  const tailText = fullText.slice(tailCutoff);
-  const headText = fullText.slice(0, tailCutoff);
-
-  const makeChunk = (slice: string, charOffset: number, idx: number): Chunk | null => {
-    if (slice.trim().length < 300) return null;
-    const startRatio = charOffset / textLen;
-    const endRatio = Math.min(1, (charOffset + CHUNK_SIZE) / textLen);
-    return {
-      text: slice,
-      estStartPage: Math.max(1, Math.round(startRatio * pageCount)),
-      estEndPage: Math.min(pageCount, Math.round(endRatio * pageCount) + 1),
-      index: idx,
-    };
-  };
-
-  const chunks: Chunk[] = [];
-
-  // Tail: evenly-sampled positions within last 40%
-  const tailStep = Math.max(CHUNK_SIZE - CHUNK_OVERLAP, Math.ceil(tailText.length / tailBudget));
-  for (let i = 0; i < tailText.length && chunks.length < tailBudget; i += tailStep) {
-    const c = makeChunk(tailText.slice(i, i + CHUNK_SIZE), tailCutoff + i, chunks.length);
-    if (c) chunks.push(c);
-  }
-
-  // Head: evenly-sampled positions within first 60%
-  const headStep = Math.max(CHUNK_SIZE - CHUNK_OVERLAP, Math.ceil(headText.length / headBudget));
-  const headChunks: Chunk[] = [];
-  for (let i = 0; i < headText.length && headChunks.length < headBudget; i += headStep) {
-    const c = makeChunk(headText.slice(i, i + CHUNK_SIZE), i, headChunks.length);
-    if (c) headChunks.push(c);
-  }
-
-  // Combine: tail first (highest directive density), then head
-  const all = [...chunks, ...headChunks].slice(0, MAX_CHUNKS);
-  // Re-index
-  all.forEach((c, i) => { c.index = i; });
-  return all;
-}
-
-/** Deduplicate directives — two are considered the same if their sourceTexts
- *  share >70% of significant words (length > 3). */
-function deduplicateDirectives(directives: ExtractedDirective[]): ExtractedDirective[] {
-  const sig = (s: string) =>
-    new Set(s.toLowerCase().split(/\W+/).filter((w) => w.length > 3));
-
-  const unique: ExtractedDirective[] = [];
-  for (const d of directives) {
-    const wordsD = sig(d.sourceText);
-    const isDup = unique.some((u) => {
-      const wordsU = sig(u.sourceText);
-      const smaller = Math.min(wordsD.size, wordsU.size);
-      if (smaller === 0) return false;
-      let overlap = 0;
-      for (const w of wordsD) if (wordsU.has(w)) overlap++;
-      return overlap / smaller > 0.7;
-    });
-    if (!isDup) unique.push(d);
-  }
-  return unique;
-}
-
-/** Parse the raw AI response string into an array of ExtractedDirective objects. */
-function parseDirectivesResponse(content: string): ExtractedDirective[] {
-  let parsed: { directives?: ExtractedDirective[] } = {};
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    try {
-      const match = content.match(/\[[\s\S]*\]/);
-      parsed = { directives: JSON.parse(match?.[0] ?? "[]") };
-    } catch {
-      return [];
-    }
-  }
-  return parsed.directives ?? (Array.isArray(parsed) ? (parsed as unknown as ExtractedDirective[]) : []);
-}
-
-/** Single AI call for one text chunk. Returns [] on any error (chunk may have no directives). */
-async function extractChunk(
-  chunk: Chunk,
-  caseContext: string,
-  dateOfOrder: string | null
-): Promise<ExtractedDirective[]> {
-  const systemPrompt = `You are VerdictIQ, a specialized legal AI for Indian government compliance. You are given a SINGLE EXCERPT from a larger court judgment. Your task is to extract every court-ordered directive, compliance obligation, stay order, deadline, and direction found in this excerpt.
-
-IMPORTANT RULES:
-- Only extract actual court orders and directions — not arguments of counsel, factual recitals, or pure observations.
-- Look for operative language: "is directed to", "shall", "is ordered to", "we direct", "we order", "ORDERED THAT", "In the result", "Accordingly", "is required to", "must comply".
-- If this excerpt contains NO directives, return {"directives": []}.
-- Do NOT invent directives not present in this excerpt.
-- Source text must be verbatim from the excerpt.
-- Page numbers: use the provided start/end page range as context.
-
-For each directive found, return:
-{
-  "type": "compliance_order" | "stay" | "direction" | "limitation_period" | "appeal" | "observation" | "other",
-  "classification": "mandatory" | "advisory",
-  "sourceText": "<verbatim text from excerpt>",
-  "pageNumber": <integer within provided range>,
-  "paragraphRef": "<e.g. Para 12>" | null,
-  "deadline": "<YYYY-MM-DD>" | null,
-  "deadlineInferred": true | false,
-  "deadlineSource": "<how determined>" | null,
-  "responsibleDepartment": "<specific Indian govt department/authority>",
-  "actionRequired": "<one sentence imperative>",
-  "isNovel": true | false,
-  "confidenceScore": 0.0-1.0
-}
-
-Return a JSON object with key "directives" containing the array — e.g. {"directives": [...]}. May be empty.`;
-
-  const userPrompt = `CASE CONTEXT:
-${caseContext}
-
-DOCUMENT EXCERPT (pages ${chunk.estStartPage}–${chunk.estEndPage}):
-${chunk.text}`;
-
-  const response = await openai.chat.completions.create({
-    model: MODEL,
-    max_completion_tokens: 4096,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    response_format: { type: "json_object" },
-  });
-
-  const content = response.choices[0]?.message?.content ?? "{}";
-  return parseDirectivesResponse(content);
-}
-
-/** Metadata-only extraction (no PDF text). Used when no document has been uploaded. */
-async function extractDirectivesWithAI(caseRow: {
-  caseNumber: string;
-  court: string;
-  bench: string | null;
-  benchType: string | null;
-  dateOfOrder: string | null;
-  petitioner: string | null;
-  respondent: string | null;
-  governmentRole: string | null;
-  notes: string | null;
-}): Promise<ExtractedDirective[]> {
-  const caseContext = `Case Number: ${caseRow.caseNumber}
-Court: ${caseRow.court}
-Bench: ${caseRow.bench ?? "Not specified"} (${caseRow.benchType ?? "single"} bench)
-Date of Order: ${caseRow.dateOfOrder ?? "Not specified"}
-Petitioner: ${caseRow.petitioner ?? "Not specified"}
-Respondent: ${caseRow.respondent ?? "Not specified"}
-Government Role: ${caseRow.governmentRole ?? "Not specified"}
-Case Notes/Nature: ${caseRow.notes ?? "No notes provided"}`;
-
-  const systemPrompt = `You are VerdictIQ, a specialized legal AI for Indian government compliance. No PDF has been provided. Infer realistic directives based solely on the case metadata.
-
-Extract 5–9 plausible directives a court would typically issue in a case of this nature. Make each directive realistic, legally precise, and specific to the facts provided.
-
-For each directive return:
-{ "type", "classification", "sourceText", "pageNumber", "paragraphRef", "deadline", "deadlineInferred", "deadlineSource", "responsibleDepartment", "actionRequired", "isNovel", "confidenceScore" }
-
-Return a JSON object: {"directives": [...]}.`;
-
-  const response = await openai.chat.completions.create({
-    model: MODEL,
-    max_completion_tokens: 8192,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `Analyze this case and generate plausible directives:\n\n${caseContext}` },
-    ],
-    response_format: { type: "json_object" },
-  });
-
-  const content = response.choices[0]?.message?.content ?? "{}";
-  return parseDirectivesResponse(content);
-}
-
-/** Full-document chunked extraction. Processes chunks in parallel batches. */
-async function extractDirectivesFromFullText(
-  caseRow: {
-    caseNumber: string;
-    court: string;
-    bench: string | null;
-    benchType: string | null;
-    dateOfOrder: string | null;
-    petitioner: string | null;
-    respondent: string | null;
-    governmentRole: string | null;
-    notes: string | null;
-  },
-  fullText: string,
-  pageCount: number,
-  logger: { info: (obj: object, msg: string) => void }
-): Promise<ExtractedDirective[]> {
-  const estimatedPages = pageCount > 0 ? pageCount : Math.ceil(fullText.length / CHARS_PER_PAGE_ESTIMATE);
-  const chunks = buildChunks(fullText, estimatedPages);
-
-  const caseContext = `Case: ${caseRow.caseNumber} | Court: ${caseRow.court} | Date: ${caseRow.dateOfOrder ?? "unknown"} | Petitioner: ${caseRow.petitioner ?? "unknown"} | Respondent: ${caseRow.respondent ?? "unknown"} | Notes: ${caseRow.notes ?? "none"}`;
-
-  logger.info(
-    { totalChunks: chunks.length, docChars: fullText.length, estimatedPages },
-    "Starting chunked extraction"
-  );
-
-  const allDirectives: ExtractedDirective[] = [];
-
-  // Process in parallel batches
-  for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
-    const batch = chunks.slice(i, i + CHUNK_BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((chunk) => extractChunk(chunk, caseContext, caseRow.dateOfOrder))
-    );
-
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        allDirectives.push(...result.value);
-      } else {
-        logger.info(
-          { batchStart: i, error: String(result.reason), stack: result.reason?.stack?.slice(0, 500) },
-          "Chunk extraction error"
-        );
-      }
-    }
-
-    logger.info(
-      { batchStart: i, batchSize: batch.length, foundSoFar: allDirectives.length },
-      "Chunk batch complete"
-    );
-  }
-
-  // Deduplicate across all chunks
-  const unique = deduplicateDirectives(allDirectives);
-
-  logger.info(
-    { total: allDirectives.length, afterDedup: unique.length },
-    "Chunked extraction complete"
-  );
-
-  return unique;
-}
+import { eq, and, or, ilike, desc, asc, sql, inArray } from "drizzle-orm";
+import { enqueueProcessingJob } from "../processing/processing-queue";
 
 const router = Router();
 
@@ -589,155 +262,46 @@ router.post("/cases/:id/process", requireRole(["admin"]), async (req, res) => {
 
   if (!caseRow) return res.status(404).json({ error: "Case not found" });
 
+  const existingJob = await db
+    .select()
+    .from(processingJobsTable)
+    .where(
+      and(
+        eq(processingJobsTable.caseId, caseRow.id),
+        inArray(processingJobsTable.status, ["queued", "running"])
+      )
+    )
+    .then((rows) => rows[0]);
+
+  if (existingJob) {
+    return res.json({
+      caseId: caseRow.id,
+      status: "processing",
+      message: "AI processing already queued or running.",
+      directivesExtracted: null,
+    });
+  }
+
   await db
     .update(casesTable)
     .set({ status: "processing", processingStartedAt: new Date(), updatedAt: new Date() })
     .where(eq(casesTable.id, caseRow.id));
 
-  // Fetch the stored judgment record — the full text is in rawTextPreview
-  let existingJudgment = await db
-    .select()
-    .from(judgmentsTable)
-    .where(eq(judgmentsTable.caseId, caseRow.id))
-    .then((r) => r[0]);
-
-  // Determine text source: prefer DB-stored full text over anything passed in the body
-  const storedFullText: string = existingJudgment?.rawTextPreview ?? "";
-  const storedPageCount: number = existingJudgment?.pageCount ?? 0;
-  const hasRealText = storedFullText.trim().length > 500;
+  await enqueueProcessingJob(caseRow.id);
 
   await db.insert(auditLogTable).values({
     caseId: caseRow.id,
     caseNumber: caseRow.caseNumber,
-    eventType: "processing_started",
-    description: hasRealText
-      ? `AI processing started: ${storedPageCount} pages, ${storedFullText.length.toLocaleString()} chars, chunked extraction`
-      : `AI processing started (no PDF — metadata-only extraction)`,
-    modelVersion: MODEL,
+    eventType: "processing_queued",
+    description: "AI processing queued and will continue in the background.",
   });
 
-  if (!existingJudgment) {
-    const crypto = await import("node:crypto");
-    const hash = crypto.createHash("sha256").update(caseRow.caseNumber + Date.now()).digest("hex").slice(0, 16);
-    [existingJudgment] = await db
-      .insert(judgmentsTable)
-      .values({
-        caseId: caseRow.id,
-        pdfHash: `sha256:${hash}`,
-        pageCount: 0,
-        isScanned: false,
-        overallOcrConfidence: null,
-        lowConfidencePages: "[]",
-        modelVersion: MODEL,
-        rawTextPreview: null,
-      })
-      .returning()
-      .then((r) => r);
-  }
-
-  try {
-    let extracted: ExtractedDirective[];
-
-    if (hasRealText) {
-      // Full-document chunked extraction from the uploaded PDF text
-      extracted = await extractDirectivesFromFullText(
-        caseRow,
-        storedFullText,
-        storedPageCount,
-        req.log
-      );
-    } else {
-      // No PDF uploaded — fall back to metadata-only inference
-      extracted = await extractDirectivesWithAI(caseRow);
-    }
-
-    await db.delete(actionItemsTable).where(eq(actionItemsTable.caseId, caseRow.id));
-    await db.delete(directivesTable).where(eq(directivesTable.caseId, caseRow.id));
-
-    let inserted = 0;
-    for (const d of extracted) {
-      const [directive] = await db
-        .insert(directivesTable)
-        .values({
-          caseId: caseRow.id,
-          judgmentId: existingJudgment.id,
-          type: sanitizeDirectiveType(d.type),
-          classification: sanitizeClassification(d.classification),
-          sourceText: d.sourceText,
-          pageNumber: d.pageNumber,
-          paragraphRef: d.paragraphRef ?? null,
-          deadline: sanitizeDate(d.deadline),
-          deadlineInferred: d.deadlineInferred,
-          deadlineSource: d.deadlineSource ?? null,
-          responsibleDepartment: normalizeDepartment(d.responsibleDepartment),
-          actionRequired: d.actionRequired,
-          isNovel: d.isNovel,
-          confidenceScore: Math.min(1, Math.max(0, d.confidenceScore)),
-          verificationStatus: "pending",
-        })
-        .returning();
-
-      await db.insert(actionItemsTable).values({
-        caseId: caseRow.id,
-        directiveId: directive.id,
-        title: d.actionRequired.length > 80 ? d.actionRequired.slice(0, 77) + "..." : d.actionRequired,
-        description: d.actionRequired,
-        department: normalizeDepartment(d.responsibleDepartment) ?? "Unassigned",
-        priority: d.classification === "mandatory"
-          ? (d.type === "stay" || d.type === "compliance_order" ? "critical" : "high")
-          : "medium",
-        classification: d.classification,
-        deadline: sanitizeDate(d.deadline),
-        deadlineInferred: d.deadlineInferred,
-        status: "pending",
-        sourcePageNumber: d.pageNumber,
-        sourceText: d.sourceText,
-      });
-
-      inserted++;
-    }
-
-    await db
-      .update(casesTable)
-      .set({ status: "under_review", processingCompletedAt: new Date(), updatedAt: new Date() })
-      .where(eq(casesTable.id, caseRow.id));
-
-    const avgConf =
-      extracted.length > 0
-        ? (extracted.reduce((s, d) => s + d.confidenceScore, 0) / extracted.length).toFixed(2)
-        : "N/A";
-
-    await db.insert(auditLogTable).values({
-      caseId: caseRow.id,
-      caseNumber: caseRow.caseNumber,
-      eventType: "processing_completed",
-      description: `${inserted} directives extracted (avg confidence ${avgConf}). ${extracted.filter((d) => d.isNovel).length} flagged for expert review. ${hasRealText ? `Source: full PDF (${storedPageCount} pages, chunked)` : "Source: metadata inference"}`,
-      modelVersion: MODEL,
-      pdfHash: existingJudgment.pdfHash,
-    });
-
-    return res.json({
-      caseId: caseRow.id,
-      status: "completed",
-      message: `${inserted} directives extracted and ready for verification`,
-      directivesExtracted: inserted,
-    });
-  } catch (err: unknown) {
-    req.log.error({ err }, "AI extraction failed");
-
-    await db
-      .update(casesTable)
-      .set({ status: "pending", updatedAt: new Date() })
-      .where(eq(casesTable.id, caseRow.id));
-
-    const message = err instanceof Error ? err.message : String(err);
-    return res.status(500).json({
-      caseId: caseRow.id,
-      status: "failed",
-      message: `AI extraction failed: ${message}`,
-      directivesExtracted: null,
-    });
-  }
+  return res.json({
+    caseId: caseRow.id,
+    status: "started",
+    message: "AI processing queued. You can continue working while it runs.",
+    directivesExtracted: null,
+  });
 });
 
 router.get("/cases/:id/compliance-timeline", async (req, res) => {

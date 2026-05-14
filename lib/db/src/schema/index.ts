@@ -8,3 +8,4 @@ export * from "./messages";
 export * from "./users";
 export * from "./case_comments";
 export * from "./role_change_log";
+export * from "./processing_jobs";

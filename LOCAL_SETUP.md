@@ -18,11 +18,12 @@ This workspace now runs locally with Supabase PostgreSQL (no local database stor
 Update `DATABASE_URL` to your Supabase Postgres connection string.
 
 Replace these placeholders before using authenticated app flows:
-
+- `CLERK_SECRET_KEY`
 
 Optional overrides:
-- `AI_INTEGRATIONS_GROQ_BASE_URL` (defaults to Groq OpenAI-compatible endpoint)
-- `AI_INTEGRATIONS_GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`)
+- `AI_INTEGRATIONS_OLLAMA_BASE_URL` (defaults to http://localhost:11434/v1)
+- `AI_INTEGRATIONS_OLLAMA_API_KEY` (defaults to `ollama`)
+- `AI_INTEGRATIONS_OLLAMA_MODEL` (defaults to `llama3.1:8b`)
 
 The public Clerk key from the Replit config is already copied into `.env.local`.
 

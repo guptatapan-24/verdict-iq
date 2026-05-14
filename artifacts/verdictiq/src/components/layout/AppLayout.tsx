@@ -1,4 +1,5 @@
 import { Link, useLocation } from "wouter";
+import { useEffect, useMemo, useRef } from "react";
 import { LayoutDashboard, FileText, PlusCircle, LogOut, ChevronUp, Users, Shield } from "lucide-react";
 import { useUser, useClerk } from "@clerk/react";
 import { Sidebar, SidebarContent, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarFooter } from "@/components/ui/sidebar";
@@ -10,6 +11,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useUserRole } from "@/contexts/UserRoleContext";
+import { useListCases } from "@workspace/api-client-react";
+import { useToast } from "@/hooks/use-toast";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Admin",
@@ -22,6 +25,40 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const { user } = useUser();
   const { signOut } = useClerk();
   const { isAdmin, isViewer, role } = useUserRole();
+  const { toast } = useToast();
+
+  const { data: processingCases } = useListCases(
+    { status: "processing" },
+    {
+      query: {
+        enabled: true,
+        queryKey: ["processing-cases"],
+        refetchInterval: 5000,
+      },
+    }
+  );
+
+  const activeCases = useMemo(() => processingCases ?? [], [processingCases]);
+  const prevCaseIds = useRef<Map<number, string>>(new Map());
+
+  useEffect(() => {
+    const currentIds = new Map(activeCases.map((c) => [c.id, c.caseNumber]));
+    if (prevCaseIds.current.size > 0) {
+      const completed: string[] = [];
+      for (const [id, caseNumber] of prevCaseIds.current.entries()) {
+        if (!currentIds.has(id)) {
+          completed.push(caseNumber);
+        }
+      }
+      if (completed.length > 0) {
+        toast({
+          title: "Processing complete",
+          description: `Directives generated for: ${completed.slice(0, 3).join(", ")}${completed.length > 3 ? "…" : ""}`,
+        });
+      }
+    }
+    prevCaseIds.current = currentIds;
+  }, [activeCases, toast]);
 
   const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -117,6 +154,22 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </SidebarFooter>
         </Sidebar>
         <main className="flex-1 overflow-y-auto bg-background text-foreground flex flex-col">
+          <div className="sticky top-0 z-10 flex items-center justify-end px-6 py-3 border-b bg-background/95 backdrop-blur">
+            <div className="min-w-[260px] rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="uppercase tracking-wider">AI Processing</span>
+                <span className="font-semibold text-foreground">{activeCases.length}</span>
+              </div>
+              {activeCases.length > 0 ? (
+                <div className="mt-1 text-foreground/80">
+                  {activeCases.slice(0, 2).map((c) => c.caseNumber).join(", ")}
+                  {activeCases.length > 2 ? "…" : ""}
+                </div>
+              ) : (
+                <div className="mt-1">No active extractions</div>
+              )}
+            </div>
+          </div>
           {children}
         </main>
       </div>

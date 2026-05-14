@@ -96,7 +96,7 @@
 | **Frontend** | Case Dashboard, Verification UI, Compliance Tracking | React 19, Vite, TypeScript, Tailwind CSS v4, Radix UI, shadcn/ui |
 | **Backend** | API Server, Business Logic, Verification Workflows | Express 5, TypeScript, Zod validation, Clerk auth |
 | **Database** | Case Management, Directives, Audit Logs, User Data | PostgreSQL with Drizzle ORM |
-| **AI Integration** | Judgment Analysis, Directive Extraction, Classification | Groq API (OpenAI-compatible, batch processing) |
+| **AI Integration** | Judgment Analysis, Directive Extraction, Classification | Gemini (OpenAI-compatible API) |
 | **Type Safety** | API Contract, Schema Validation | OpenAPI (Orval code generation), Zod schemas |
 | **Authentication** | User Identity, Role-Based Access | Clerk (embedded, white-labeled for Government) |
 | **Infrastructure** | Deployment, Scaling, Monitoring | Replit (current), migration path to AWS/Government cloud |
@@ -285,7 +285,7 @@ Many judgments issue directives to 3+ departments with different timelines and c
 - **Backend:** Express server running on Replit (port :5000)
 - **Frontend:** React dashboard operational (port :5173)
 - **Database:** PostgreSQL with Drizzle ORM schema implemented
-- **AI Integration:** Groq API integration for extraction and analysis
+- **AI Integration:** Gemini OpenAI-compatible integration for extraction and analysis
 
 ### Integration Points (Ready)
 - **CCMS Integration:** API endpoints designed for Indian High Court CCMS hookup
@@ -360,7 +360,7 @@ Many judgments issue directives to 3+ departments with different timelines and c
 - Express API server with TypeScript
 - React dashboard with case management interface
 - PDF upload and processing
-- AI extraction pipeline with Groq integration
+- AI extraction pipeline with Gemini OpenAI-compatible integration
 - Human verification UI with source highlighting
 - Audit trail logging
 - Type-safe API client generation (Orval)

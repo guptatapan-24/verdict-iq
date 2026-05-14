@@ -6,6 +6,7 @@ import { casesTable } from "./cases";
 export const auditEventTypeEnum = pgEnum("audit_event_type", [
   "extraction", "verification", "edit", "rejection", "processing",
   "judgment_uploaded", "processing_started", "processing_completed",
+  "processing_queued", "processing_failed",
   "directive_verified", "directive_edited", "directive_rejected",
   "action_item_updated", "case_created"
 ]);

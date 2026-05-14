@@ -1,5 +1,5 @@
 import { useParams, Link, useLocation } from "wouter";
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useUserRole } from "@/contexts/UserRoleContext";
 import { 
   useGetCase, 
@@ -59,8 +59,14 @@ export default function CaseDetail() {
   const replaceFileInputRef = useRef<HTMLInputElement>(null);
   const [showReprocessDialog, setShowReprocessDialog] = useState(false);
 
+  const [pollProcessing, setPollProcessing] = useState(false);
+
   const { data: caseData, isLoading } = useGetCase(caseId, {
-    query: { enabled: !!caseId, queryKey: getGetCaseQueryKey(caseId) }
+    query: {
+      enabled: !!caseId,
+      queryKey: getGetCaseQueryKey(caseId),
+      refetchInterval: pollProcessing ? 5000 : false,
+    }
   });
 
   const { data: directives, isLoading: isDirectivesLoading } = useListDirectives(caseId, {}, {
@@ -146,6 +152,23 @@ export default function CaseDetail() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractElapsed, setExtractElapsed] = useState(0);
 
+  useEffect(() => {
+    if (caseData?.status === "processing") {
+      setPollProcessing(true);
+    }
+  }, [caseData?.status]);
+
+  useEffect(() => {
+    if (!caseData) return;
+    if (caseData.status === "processing") return;
+    if (!pollProcessing) return;
+    setPollProcessing(false);
+    queryClient.invalidateQueries({ queryKey: ["directives", caseId] });
+    queryClient.invalidateQueries({ queryKey: ["action-plan", caseId] });
+    queryClient.invalidateQueries({ queryKey: ["timeline", caseId] });
+    queryClient.invalidateQueries({ queryKey: ["audit-log", caseId] });
+  }, [caseData, pollProcessing, caseId, queryClient]);
+
   const { mutate: deleteCase, isPending: isDeleting } = useDeleteCase({
     mutation: {
       onSuccess: () => {
@@ -174,18 +197,12 @@ export default function CaseDetail() {
       });
       if (!res.ok) throw new Error("Extraction failed");
       const result = await res.json();
-      const count = result.directivesExtracted ?? 0;
       toast({
-        title: count > 0 ? `${count} Directives Extracted` : "Processing Complete",
-        description: count > 0
-          ? `AI extracted ${count} directives from the full judgment. Review and verify each one below.`
-          : "No directives found — the AI may need more context. Try adding case notes.",
+        title: "Processing Started",
+        description: result?.message ?? "AI processing queued. You can continue working while it runs.",
       });
+      setPollProcessing(true);
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
-      queryClient.invalidateQueries({ queryKey: ["directives", caseId] });
-      queryClient.invalidateQueries({ queryKey: ["action-plan", caseId] });
-      queryClient.invalidateQueries({ queryKey: ["timeline", caseId] });
-      queryClient.invalidateQueries({ queryKey: ["audit-log", caseId] });
       setUploadResult(null);
     } catch {
       toast({ title: "Extraction Failed", description: "AI processing encountered an error. Please try again.", variant: "destructive" });
@@ -486,7 +503,7 @@ export default function CaseDetail() {
                     <p className="text-xs text-muted-foreground">
                       {uploadResult
                         ? uploadResult.pageCount > 30
-                          ? `AI will scan all ${uploadResult.pageCount} pages in chunks — may take 1–3 minutes for large judgments.`
+                          ? `AI will scan all ${uploadResult.pageCount} pages in chunks — runs in the background for large judgments.`
                           : "AI will read the full judgment to identify all directives, deadlines, and compliance obligations."
                         : "No PDF uploaded. AI will extract based on case metadata and notes."}
                     </p>
@@ -497,7 +514,7 @@ export default function CaseDetail() {
                   <Loader2 className="w-12 h-12 text-primary mx-auto mb-4 animate-spin" />
                   <h3 className="text-lg font-medium">Extracting Directives…</h3>
                   <p className="text-muted-foreground max-w-md mx-auto mt-2">
-                    The AI is reading the judgment in chunks and extracting compliance directives from every page. Large documents (100+ pages) may take 1–3 minutes — please keep this tab open.
+                    The AI is processing this judgment in the background. You can continue working on other cases while extraction runs.
                   </p>
                 </div>
               ) : (
@@ -662,6 +679,10 @@ export default function CaseDetail() {
                     <option value="pdf_uploaded">PDF Uploaded</option>
                     <option value="extraction_started">Extraction Started</option>
                     <option value="extraction_complete">Extraction Complete</option>
+                    <option value="processing_queued">Processing Queued</option>
+                    <option value="processing_started">Processing Started</option>
+                    <option value="processing_completed">Processing Completed</option>
+                    <option value="processing_failed">Processing Failed</option>
                     <option value="directive_verified">Directive Verified</option>
                     <option value="directive_edited">Directive Edited</option>
                     <option value="directive_rejected">Directive Rejected</option>
